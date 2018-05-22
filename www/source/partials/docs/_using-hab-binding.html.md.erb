@@ -8,7 +8,7 @@ For example, you might have a web application `app-server` that depends on the v
 
 - a required bind (`pkg_binds`) means that your service fails if it does not find a producer (with a `pkg_exports`) with the exact `binds` values that your service wants available to it.
 - a producer can _export_ a larger variety of _binds_ than an individual service needs in a required bind
-- an optional bind (`pkg_binds_optional`) allows you to have more flexibility for services that require it. You can use an optional bind in several ways (list not conclusive):
+- an optional bind (`pkg_binds_optional`) allows you to have more flexibility for services that require it. You can use an optional bind in several ways (list not exhaustive):
 -- service group A can optionally bind to "X". It will start without X being present (which could cause the service to fail to start). You may also expose optional configuration in your `default.toml` which you can write into your `config/hooks` in place of where the "X" would normally be satisfying. ((Real world example: an application service group that binds to a postgresql cluster or RDS, depending on where you are deploying it))
 -- service group A can optionally bind to “X”. “X” may provide additional features if it is provided. A runs successfully whether or not "X" is present. ((Real world example: an application service group that binds to a caching layer in certain situations))
 -- service group A can optionally bind to “X” or “Y”. If “X” is present, we operate this way, if “Y” is present, we operate this way. The service will start and may fail because “X” and/or “Y” my not be present at start, but it will eventually start. ((Real world example: an application service group that could use a redis backend or a postgresql backend, depending on how you are deploying it in different scenarios))
@@ -17,7 +17,7 @@ Read on for more details.
 
 ## Producer Contract
 
-The producer defines their contract by "exporting" configuration publicly to consumers. This is done by setting keys in the `pkg_exports` associative array defined in your package's `plan.sh`. For example, a database server named `amnesia` might define the exports:
+The producer defines their contract by "exporting" a subset of their runtime configuration to consumers. This is done by setting keys in the `pkg_exports` associative array defined in your package's `plan.sh`. For example, a database server named `amnesia` might define the exports:
 
 ```bash
 pkg_exports=(
@@ -26,11 +26,11 @@ pkg_exports=(
 )
 ```
 
-This will export the value of `network.port` and `transport.ssl.port` defined in it's `default.toml` publicly as `port` and `ssl-port` respectively. All `pkg_exports` must define a default value in `default.toml` but their values may change at runtime by an operator configuring the service group. If this happens, the consumer will be notified that their producer's configuration has changed. We'll see how to leverage this on the consumer in the sections below.
+This will export the runtime value of its `network.port` and `transport.ssl.port` configuration entries publicly as `port` and `ssl-port`, respectively. All configuration entries in `pkg_exports` must define a default value in `default.toml`, but the actual values being exported will change at runtime to reflect current state. When values change (such as when an operator uses `hab config apply`), the consumer will be notified that their producer's configuration has changed. We'll see how to leverage this on the consumer in the sections below.
 
 ## Consumer Contract
 
-Consumers defines their half of the contract by specifying required and optional "binds". These are also represented by key/value pairs in an associative array called `pkg_binds` and `pkg_binds_optional` where the values are the exported keys defined by the producer. For example, an application server named `session-server` that depends on a database might define the following binds:
+Consumers define their half of the contract by specifying required and optional "binds". These are also represented by key/value pairs in an associative array called `pkg_binds` and `pkg_binds_optional` where the values are space-delimited lists of the required values the consumer needs. For example, an application server named `session-server` that depends on a database might define the following bind:
 
 ```bash
 pkg_binds=(
@@ -38,17 +38,38 @@ pkg_binds=(
 )
 ```
 
-This says that `session-server` needs to bind to a service aliased as `database` and that service must export a configuration key for both `port` and `ssl-port`. This would make this application service compatible with the producer we defined above for a database called `amnesia` since it does export a value for both of these keys.
+This says that the service group that `session-server` bind using the alias `database` must export a value for both `port` and `ssl-port`. This would make this application service compatible with the producer we defined above for a database called `amnesia` since it does export a value for both of these keys. A bound service group may export additional values, but they cannot export less and still satisfy the contract.
 
-A required bind (`pkg_binds`) means that your service fails if it does not find a producer with the exact `binds` values that your service wants available to it. A producer can also _export_ a larger variety of keys than an individual service needs in a required bind.
+## Required and Optional Binds
 
-An optional bind (`pkg_binds_optional`) allows you to have more flexibility for services that require it. You can use an optional bind in several ways (list not conclusive):
+By creating a bind on the consuming side of a service relationship, you are telling Habitat that certain parts of your configuration should come in from other services. By creating a binding alias, you can construct your configuration and lifecycle hook templates in a general way, giving you runtime flexibility on what specific services serve as your sources.
 
- * Service group A can optionally bind to "X". It will start without X being present (which could cause the service to fail to start). You may also expose optional configuration in your `default.toml` which you can write into your `config/hooks` in place of where the "X" would normally be satisfying. Real world example: An application service group that binds to a PostgreSQL cluster or RDS, depending on where you are deploying it.
- * Service group A can optionally bind to “X”. “X” may provide additional features if it is provided. A runs successfully whether or not "X" is present. Real world example: An application service group that binds to a caching layer in certain situations.
- * Service group A can optionally bind to “X” or “Y”. If “X” is present, we operate this way, if “Y” is present, we operate this way. The service will start and may fail because “X” and/or “Y” my not be present at start, but it will eventually start. Real world example: An application service group that could use a Redis backend or a PostgreSQL backend, depending on how you are deploying it in different scenarios.
+A required bind (defined in `pkg_binds`) means in order for Habitat to start the service, a mapping from bind name to service group *must* be provided.
+
+An optional bind (defined in `pkg_binds_optional`) means that Habitat can start the service whether or not a mapping is provided.
+
+
+You can use an optional bind in several ways (list not exhaustive):
+
+ * Service A can optionally bind to "X". It will start without "X" being present (which could cause the service to fail to start). You may also expose optional configuration in your `default.toml` which you can write into your `config/hooks` in place of where the "X" would normally be satisfying. Real world example: An application service group that binds to a PostgreSQL cluster or RDS, depending on where you are deploying it.
+
+ * Service A can be optionally bound to “X”, where the “X” may unlock additional features. For example, say you have an application that may run with or without a caching layer. You can model this using an optional bind named (say), "cache". If you wish to run without the caching functionality enabled, you can start the service without specifying a service group mapping for the "cache" bind. Since the bind is optional, it is not needed for Habitat to run your service. However, if you do wish to run with the caching enabled, you can specify a service group mapping, e.g. `hab svc load acme/my-app --bind=cache:redis.prod`. In this scenario, your service's configuration can pull configuration values from the `redis.prod` service group, enabling it to use its caching functionality.
+
+* Service A can optionally bind to “X” or “Y”. If “X” is present, we operate this way; if “Y” is present, we operate that way. The service will start and may fail because “X” and/or “Y” my not be present at start, but it will eventually start. Real world example: An application service group that could use a Redis backend or a PostgreSQL backend, depending on how you are deploying it in different scenarios.
 
  <%= partial "/partials/global/exports_examples" %>
+
+## Binding Mode
+
+Prior to Habitat 0.56.0, if the service group that you bound to was not present in the Supervisor network census, or had no live members, the startup of your service would block until the group was present and alive. While this can be desirable behavior in some cases, as with running certain legacy applications, it is not always desirable, particularly for modern microservice applications, which should be able to gracefully cope with the absence of their networked dependencies.
+
+With 0.56.0, however, this behavior can be modified using the new runtime service option `--binding-mode`. By setting `--binding-mode=relaxed` when loading a service, that service can start immediately, whether there are any members of a bound service group present or not. (Setting `--binding-mode=strict` will give you the previous, start-only-after-all-bound-groups-are-present behavior. This is also the current default, though `relaxed` will be the eventual default for Habitat 1.0.0.). Such a service should have configuration and lifecycle hook templates written in such a way that the service can remain operational (though perhaps with reduced functionality) when there are no live members of a bound service group present in the network census.
+
+## Difference between Required & Optional Binds, and Binding Mode
+
+While there is a bit of overlap in these concepts, they are distinct. It's best to think of required and optional binds as defining "how applications can be wired together" (specifically, which "wires" must be connected in order to provide the minimal amount of information needed to run a service). Binding mode, on the other hand, defines how the application's start-up behavior is affected the the presence or absence of its networked dependencies.
+
+Another useful thing to keep in mind when thinking about required and optional binds is that service group mappings currently cannot be dynamically changed at runtime. They can only be changed by stopping a service, reloading the service with a new set of options, and then starting it up again. This constraint (which may change in future versions of Habitat) may help guide your choice between what should be a required bind, and what should be optional, particularly when using the relaxed binding mode.
 
 ## Consumer's Configuration Example
 
